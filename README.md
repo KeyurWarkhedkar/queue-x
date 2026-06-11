@@ -25,6 +25,79 @@ Order Service consumers
   → marks order COMPLETED or FAILED
 ```
 
+```mermaid
+flowchart LR
+
+subgraph ORDER["Machine 1 - Order API"]
+    ORDER_API["Order Service"]
+    ORDER_DB[("Order MySQL")]
+
+    ORDER_SUCCESS["Order Success Consumer"]
+    ORDER_FAILED["Order Failed Consumer"]
+
+    ORDER_API --> ORDER_DB
+    ORDER_SUCCESS --> ORDER_DB
+    ORDER_FAILED --> ORDER_DB
+end
+
+subgraph MQ["Message Broker"]
+    ORDER_Q["order.queue"]
+
+    INV_SUCCESS_Q["inventory.success.queue"]
+
+    OUT_OF_STOCK_Q["out.of.stock.queue"]
+    OUT_OF_STOCK_NOTIFY_Q["out.of.stock.notify.queue"]
+
+    PAYMENT_FAILED_Q["payment.failed.queue"]
+    PAYMENT_FAILED_NOTIFY_Q["payment.failed.notify.queue"]
+
+    PAYMENT_SUCCESS_Q["payment.success.queue"]
+    PAYMENT_SUCCESS_NOTIFY_Q["payment.success.notify.queue"]
+end
+
+subgraph WORKERS["Machine 2 - Worker Services"]
+
+    INVENTORY["Inventory Service"]
+    PAYMENT["Payment Service"]
+    NOTIFICATION["Notification Service"]
+
+    WORKER_DB[("Worker MySQL")]
+
+    INVENTORY --> WORKER_DB
+    PAYMENT --> WORKER_DB
+end
+
+
+ORDER_API -->|Publish Order| ORDER_Q
+
+ORDER_Q --> INVENTORY
+
+INVENTORY -->|Inventory Reserved| INV_SUCCESS_Q
+INVENTORY -->|Out Of Stock| OUT_OF_STOCK_Q
+INVENTORY -->|Notify User| OUT_OF_STOCK_NOTIFY_Q
+
+OUT_OF_STOCK_Q --> ORDER_FAILED
+OUT_OF_STOCK_NOTIFY_Q --> NOTIFICATION
+
+INV_SUCCESS_Q --> PAYMENT
+
+PAYMENT -->|Payment Failed| PAYMENT_FAILED_Q
+PAYMENT -->|Notify User| PAYMENT_FAILED_NOTIFY_Q
+
+PAYMENT_FAILED_NOTIFY_Q --> NOTIFICATION
+
+PAYMENT_FAILED_Q --> INVENTORY
+INVENTORY -->|Restore Stock| WORKER_DB
+INVENTORY -->|Order Failed Event| ORDER_FAILED
+
+PAYMENT -->|Payment Success| PAYMENT_SUCCESS_Q
+PAYMENT -->|Notify User| PAYMENT_SUCCESS_NOTIFY_Q
+
+PAYMENT_SUCCESS_NOTIFY_Q --> NOTIFICATION
+
+PAYMENT_SUCCESS_Q --> ORDER_SUCCESS
+```
+
 ### Key design decisions
 
 **Outbox pattern** — order and outbox row are written in the same transaction. A scheduled poller publishes to Redis after commit. This guarantees no message is lost even if the service crashes after the DB write.
