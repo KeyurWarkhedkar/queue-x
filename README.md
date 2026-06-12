@@ -1,237 +1,307 @@
-# queue-x — Async Order Processing System
+# QueueX — Event-Driven Credit Allocation & Billing Platform
 
-A production-grade async order processing system built with Spring Boot, demonstrating event-driven architecture, the outbox pattern, idempotency, and saga-style compensation across two independent services.
+A production-grade distributed workflow platform built with Spring Boot, demonstrating event-driven architecture, the outbox pattern, idempotency, saga compensation, and asynchronous billing workflows across independently deployed services.
 
-> **Worker service repo:** [queue-x-workers](https://github.com/KeyurWarkhedkar/queue-x-workers)
+> QueueX models a B2B usage-based billing platform where requests consume resources, trigger automated billing, and progress through asynchronous workflows with reliability guarantees.
+
+**Worker service repo:** https://github.com/KeyurWarkhedkar/queue-x-workers
 
 ---
 
-## Architecture
-
-```
-Client
-  ↓ POST /orders
-Order Service (port 8080)
-  → saves order + outbox row (same transaction)
-  → outbox poller publishes to Redis queue
-  ↓ order_queue
-Worker Service (port 8081)
-  → inventory check (atomic decrement)
-  → payment processing (3 retries, exponential backoff)
-  → notification emails
-  → publishes status events back to order service
-  ↓
-Order Service consumers
-  → marks order COMPLETED or FAILED
-```
+# Architecture Overview
 
 ```mermaid
 flowchart LR
 
-subgraph ORDER["Machine 1 - Order API"]
-    ORDER_API["Order Service"]
-    ORDER_DB[("Order MySQL")]
+CLIENT[Client]
 
-    ORDER_SUCCESS["Order Success Consumer"]
-    ORDER_FAILED["Order Failed Consumer"]
+subgraph MAIN["Billing Orchestrator Service"]
+    API["REST API"]
+    DB[("MySQL")]
+    OUTBOX["Outbox Poller"]
+    STATUS["Status Consumers"]
 
-    ORDER_API --> ORDER_DB
-    ORDER_SUCCESS --> ORDER_DB
-    ORDER_FAILED --> ORDER_DB
+    API --> DB
+    OUTBOX --> DB
+    STATUS --> DB
 end
 
-subgraph MQ["Message Broker"]
-    ORDER_Q["order.queue"]
-
-    INV_SUCCESS_Q["inventory.success.queue"]
-
-    OUT_OF_STOCK_Q["out.of.stock.queue"]
-    OUT_OF_STOCK_NOTIFY_Q["out.of.stock.notify.queue"]
-
-    PAYMENT_FAILED_Q["payment.failed.queue"]
-    PAYMENT_FAILED_NOTIFY_Q["payment.failed.notify.queue"]
-
-    PAYMENT_SUCCESS_Q["payment.success.queue"]
-    PAYMENT_SUCCESS_NOTIFY_Q["payment.success.notify.queue"]
+subgraph MQ["Redis Event Bus"]
+    USAGE["usage.request.queue"]
+    ALLOCATED["resource.allocated.queue"]
+    ALLOCATION_FAILED["allocation.failed.queue"]
+    BILLING_SUCCESS["billing.success.queue"]
+    BILLING_FAILED["billing.failed.queue"]
+    NOTIFICATION["notification.queue"]
 end
 
-subgraph WORKERS["Machine 2 - Worker Services"]
+subgraph WORKERS["Workflow Engine"]
+    RESOURCE["Resource Allocation Service"]
+    PAYMENT["Payment Processing Service"]
+    EMAIL["Notification Service"]
 
-    INVENTORY["Inventory Service"]
-    PAYMENT["Payment Service"]
-    NOTIFICATION["Notification Service"]
+    WORKER_DB[("MySQL")]
 
-    WORKER_DB[("Worker MySQL")]
-
-    INVENTORY --> WORKER_DB
+    RESOURCE --> WORKER_DB
     PAYMENT --> WORKER_DB
 end
 
+CLIENT -->|POST Usage Request| API
 
-ORDER_API -->|Publish Order| ORDER_Q
+OUTBOX -->|Publish| USAGE
 
-ORDER_Q --> INVENTORY
+USAGE --> RESOURCE
 
-INVENTORY -->|Inventory Reserved| INV_SUCCESS_Q
-INVENTORY -->|Out Of Stock| OUT_OF_STOCK_Q
-INVENTORY -->|Notify User| OUT_OF_STOCK_NOTIFY_Q
+RESOURCE -->|Allocation Success| ALLOCATED
+RESOURCE -->|Allocation Failed| ALLOCATION_FAILED
+RESOURCE -->|Notify User| NOTIFICATION
 
-OUT_OF_STOCK_Q --> ORDER_FAILED
-OUT_OF_STOCK_NOTIFY_Q --> NOTIFICATION
+ALLOCATED --> PAYMENT
 
-INV_SUCCESS_Q --> PAYMENT
+PAYMENT -->|Billing Success| BILLING_SUCCESS
+PAYMENT -->|Billing Failed| BILLING_FAILED
+PAYMENT -->|Notify User| NOTIFICATION
 
-PAYMENT -->|Payment Failed| PAYMENT_FAILED_Q
-PAYMENT -->|Notify User| PAYMENT_FAILED_NOTIFY_Q
+NOTIFICATION --> EMAIL
 
-PAYMENT_FAILED_NOTIFY_Q --> NOTIFICATION
-
-PAYMENT_FAILED_Q --> INVENTORY
-INVENTORY -->|Restore Stock| WORKER_DB
-INVENTORY -->|Order Failed Event| ORDER_FAILED
-
-PAYMENT -->|Payment Success| PAYMENT_SUCCESS_Q
-PAYMENT -->|Notify User| PAYMENT_SUCCESS_NOTIFY_Q
-
-PAYMENT_SUCCESS_NOTIFY_Q --> NOTIFICATION
-
-PAYMENT_SUCCESS_Q --> ORDER_SUCCESS
+ALLOCATION_FAILED --> STATUS
+BILLING_SUCCESS --> STATUS
+BILLING_FAILED --> STATUS
 ```
 
-### Key design decisions
+---
 
-**Outbox pattern** — order and outbox row are written in the same transaction. A scheduled poller publishes to Redis after commit. This guarantees no message is lost even if the service crashes after the DB write.
+# Request Lifecycle
 
-**Idempotency at every layer** — the API deduplicates client retries via a unique constraint on `idempotency_key`. Workers use a blind INSERT into an idempotency table to prevent duplicate message processing. Both guards use DB constraints as the real safety net, not application-level checks.
-
-**Saga compensation** — inventory is reserved before payment. If payment fails after retries are exhausted, a compensating transaction releases the stock. This avoids calling the payment gateway for a refund.
-
-**Race condition safety** — concurrent order creation with the same idempotency key is handled by catching `DataIntegrityViolationException` on the unique constraint, not by a check-then-insert pattern which would have a race window.
-
-**SKIP LOCKED polling** — the outbox poller uses `SELECT FOR UPDATE SKIP LOCKED` so multiple instances never compete for the same rows, eliminating deadlock risk under concurrent polling.
+```text
+Client
+ ↓
+POST /usage-requests
+ ↓
+Billing Orchestrator Service
+ ↓
+usage.request.queue
+ ↓
+Resource Allocation Service
+ ↓
+resource.allocated.queue
+ ↓
+Payment Processing Service
+ ↓
+billing.success.queue OR billing.failed.queue
+ ↓
+Billing Orchestrator Service
+ ↓
+Final Request State
+```
 
 ---
 
-## Tech stack
+# Key Design Decisions
 
-- Java 21 · Spring Boot 3
-- MySQL (Postgres compatible)
-- Redis (message queue via LPUSH/BLPOP)
-- Spring Data JPA · Hibernate
-- Spring Scheduling (outbox poller, status consumers)
-- K6 (load testing)
+## Transactional Outbox Pattern
+
+Usage requests and outbox events are written in the same database transaction.
+
+This guarantees:
+
+* No lost events
+* Reliable publication after commit
+* Safe recovery after crashes
+
+The outbox poller later publishes events to Redis.
 
 ---
 
-## API
+## Idempotency Everywhere
 
-### POST /orders
+Client retries are handled through a unique constraint on:
 
-Creates an order and immediately returns. Payment and inventory processing happen asynchronously via the worker service.
+```text
+idempotency_key
+```
 
-**Request**
+Worker services use blind inserts into idempotency tables backed by unique constraints.
+
+This prevents duplicate:
+
+* Usage requests
+* Resource allocations
+* Billing executions
+* Notifications
+
+---
+
+## Saga Compensation
+
+Resource allocation occurs before billing.
+
+If billing ultimately fails:
+
+```text
+Allocate Resources
+        ↓
+Attempt Billing
+        ↓
+Billing Failed
+        ↓
+Compensating Action
+        ↓
+Release Resources
+```
+
+This avoids refund workflows and keeps resource state consistent.
+
+---
+
+## Race Condition Safety
+
+Concurrent requests with the same idempotency key are handled through database constraints rather than application-level existence checks.
+
+The database acts as the final source of truth.
+
+---
+
+## SKIP LOCKED Polling
+
+Outbox rows are fetched using:
+
+```sql
+SELECT ... FOR UPDATE SKIP LOCKED
+```
+
+This allows multiple pollers to operate safely without processing the same row twice.
+
+---
+
+# Tech Stack
+
+* Java 21
+* Spring Boot 3
+* MySQL
+* Redis
+* Spring Data JPA
+* Hibernate
+* Spring Scheduling
+* K6
+
+---
+
+# API
+
+## POST /usage-requests
+
+Creates a new usage request and immediately returns.
+
+Resource allocation and billing happen asynchronously.
+
+### Request
+
 ```json
 {
   "userId": 1,
-  "productId": 1,
+  "resourceId": 1,
   "quantity": 2,
   "idempotencyKey": "unique-client-generated-uuid"
 }
 ```
 
-**Response** `201 Created`
+### Response
+
 ```json
 {
-  "orderId": 123,
-  "status": "PLACED",
-  "message": "Order under process!"
+  "requestId": 123,
+  "status": "PENDING",
+  "message": "Request submitted successfully"
 }
 ```
 
-Sending the same `idempotencyKey` twice returns the same response without creating a duplicate order.
+---
 
-### GET /orders/{id}
+## GET /usage-requests/{id}
 
-Returns current order status. Poll this to track async processing.
+Returns current workflow state.
 
-**Response** `200 OK`
+### Response
+
 ```json
 {
-  "orderId": 123,
+  "requestId": 123,
   "status": "COMPLETED"
 }
 ```
 
-Possible statuses: `PLACED` → `COMPLETED` or `FAILED`
+Possible states:
+
+```text
+PENDING
+COMPLETED
+FAILED
+```
 
 ---
 
-## Database schema (Order Service)
+# Database Schema
 
-```
-orders
-  id, user_id, product_id, quantity, amount
-  status          (PLACED | COMPLETED | FAILED)
-  idempotency_key (unique constraint)
-  created_at, updated_at
+```text
+usage_requests
+  id
+  user_id
+  resource_id
+  quantity
+  amount
+  status
+  idempotency_key
+  created_at
+  updated_at
 
 outbox_event
-  id, order_id, event_type, status (PENDING | PUBLISHED | FAILED)
-  idempotency_key, retry_count, created_at
+  id
+  request_id
+  event_type
+  status
+  retry_count
+  created_at
 
 idempotency_records
-  id, message_id (unique), order_id, created_at
+  id
+  message_id
+  request_id
+  created_at
 ```
 
 ---
 
-## Configuration
+# Load Test Results
 
-Set your DB and Redis credentials in `src/main/resources/application.properties`:
+Tested using K6 with 100 concurrent virtual users over 2 minutes.
 
-```properties
-spring.datasource.url=jdbc:mysql://localhost:3306/queue_x
-spring.datasource.username=your_username
-spring.datasource.password=your_password
+| Metric         | Result       |
+| -------------- | ------------ |
+| Throughput     | 46.8 req/sec |
+| Median Latency | 32 ms        |
+| P90 Latency    | 66 ms        |
+| P95 Latency    | 82 ms        |
+| Error Rate     | 0.00%        |
+| Total Requests | 6,110        |
 
-spring.data.redis.host=localhost
-spring.data.redis.port=6379
-```
+## Consistency Verification
 
-The worker service must be running and connected to the same Redis instance for orders to be processed end to end.
+| Check                                 | Result    |
+| ------------------------------------- | --------- |
+| Requests stuck in PENDING             | 0         |
+| COMPLETED requests                    | 201       |
+| FAILED requests                       | 8         |
+| Outbox Published                      | 209 / 209 |
+| Duplicate requests                    | 0         |
+| Billing status matched workflow state | 100%      |
+| Resource allocation consistency       | 100%      |
+| Cross-DB consistency                  | Perfect   |
 
----
-
-## Load test results
-
-Tested with [K6](https://k6.io) under 100 concurrent virtual users over 2 minutes.
-
-| Metric | Result |
-|---|---|
-| Throughput | 46.8 req/sec |
-| Median latency | 32ms |
-| P90 latency | 66ms |
-| P95 latency | 82ms |
-| Error rate | 0.00% |
-| Total requests | 6,110 |
-
-### Data consistency verification (209 orders, separate test run)
-
-| Check | Result |
-|---|---|
-| Orders stuck in PLACED | 0 |
-| COMPLETED orders | 201 |
-| FAILED orders | 8 |
-| Outbox rows PUBLISHED | 209 / 209 |
-| Duplicate orders | 0 |
-| Payments matched order status | 201 SUCCESS · 8 FAILED |
-| Stock decremented | 201 units (matched COMPLETED count exactly) |
-| Cross-DB consistency | Perfect — zero mismatches |
-
-Every order reached a terminal state. No duplicates. Exact consistency across two independent databases.
+Every request reached a terminal state with zero duplicates and no data inconsistencies.
 
 ---
 
-## Related
+# Related
 
-- [queue-x-workers](https://github.com/KeyurWarkhedkar/queue-x-workers) — the worker service handling inventory, payment, and notifications
+queue-x-workers — Workflow Engine (Resource Allocation, Billing, Notifications)
