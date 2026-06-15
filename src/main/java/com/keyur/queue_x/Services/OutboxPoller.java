@@ -20,7 +20,7 @@ import java.util.UUID;
 public class OutboxPoller {
     // Fields
     private final OutboxEventRepository outboxEventRepository;
-    private final RedisMessageQueue redisMessageQueue;
+    private final MessageQueue messageQueue;
 
     @Scheduled(fixedDelay = 1000) // runs every 5 seconds
     @Transactional
@@ -31,7 +31,7 @@ public class OutboxPoller {
         for(OutboxEvent event : pendingEvents) {
             try {
                 EventDto eventDto = buildEventDto(event);
-                redisMessageQueue.publish(QueueConstants.orderQueue, eventDto);
+                messageQueue.publish(QueueConstants.orderQueue, eventDto);
                 event.setStatus(OutboxStatus.PUBLISHED);
                 outboxEventRepository.save(event);
 

@@ -15,7 +15,7 @@ import org.springframework.stereotype.Service;
 @AllArgsConstructor
 public class OutOfStockConsumer {
 
-    private final RedisMessageQueue messageQueue;
+    private final MessageQueue messageQueue;
     private final OrderRepository orderRepository;
 
     @Scheduled(fixedDelay = 100)
