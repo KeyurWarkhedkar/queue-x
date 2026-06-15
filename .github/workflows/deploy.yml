@@ -66,7 +66,13 @@ jobs:
               -e AWS_REGION=${{ env.AWS_REGION }} \
               -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
               -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
-              -e SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
+              -e SQS_ORDER_QUEUE_URL=${{ secrets.SQS_ORDER_QUEUE_URL }} \
+              -e SQS_OUT_OF_STOCK_URL=${{ secrets.SQS_OUT_OF_STOCK_URL }} \
+              -e SQS_NOTIFICATION_URL=${{ secrets.SQS_NOTIFICATION_URL }} \
+              -e SQS_PAYMENT_QUEUE_URL=${{ secrets.SQS_PAYMENT_QUEUE_URL }} \
+              -e SQS_PAYMENT_SUCCESS_QUEUE_URL=${{ secrets.SQS_PAYMENT_SUCCESS_QUEUE_URL }} \
+              -e SQS_PAYMENT_FAILED_QUEUE_URL=${{ secrets.SQS_PAYMENT_FAILED_QUEUE_URL }} \
+              -e SQS_PAYMENT_FAILED_FOR_ORDER_API_QUEUE_URL=${{ secrets.SQS_PAYMENT_FAILED_FOR_ORDER_API_QUEUE_URL }} \
               ${{ steps.build-image.outputs.image }}
 
             docker image prune -f
