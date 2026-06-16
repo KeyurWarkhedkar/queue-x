@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 
 import java.util.List;
+import java.util.Queue;
 import java.util.UUID;
 
 @Slf4j
@@ -21,6 +22,7 @@ public class OutboxPoller {
     // Fields
     private final OutboxEventRepository outboxEventRepository;
     private final MessageQueue messageQueue;
+    private final QueueConstants qs;
 
     @Scheduled(fixedDelay = 1000) // runs every 5 seconds
     @Transactional
@@ -32,6 +34,7 @@ public class OutboxPoller {
             try {
                 EventDto eventDto = buildEventDto(event);
                 messageQueue.publish(QueueConstants.orderQueue, eventDto);
+                log.info("Published event {} to {}", eventDto, qs.urlMap().get(QueueConstants.orderQueue));
                 event.setStatus(OutboxStatus.PUBLISHED);
                 outboxEventRepository.save(event);
 
