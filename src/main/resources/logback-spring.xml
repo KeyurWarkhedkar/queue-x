@@ -21,7 +21,7 @@
 
         <format>
             <label>
-                <pattern>app=queue-x-workers,level=%level</pattern>
+                <pattern>app=queue-x-orders,level=%level</pattern>
             </label>
 
             <message>
