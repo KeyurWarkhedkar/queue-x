@@ -11,6 +11,7 @@ import com.keyur.queue_x.Repositories.OrderRepository;
 import com.keyur.queue_x.Repositories.OutboxEventRepository;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,7 +38,13 @@ public class OrderServiceImpl implements OrderService {
         Optional<Order> optionalOrder = orderRepository.findByIdempotencyKey(idempotencyKey);
         if(optionalOrder.isPresent()) {
             Order existingOrder = optionalOrder.get();
-            return buildOrderResponse(existingOrder);
+            try {
+                MDC.put("orderId", String.valueOf(existingOrder.getId()));
+                log.info("sagaStep=ORDER_CREATE_REQUEST result=IDEMPOTENT_HIT existingOrderId={}", existingOrder.getId());
+                return buildOrderResponse(existingOrder);
+            } finally {
+                MDC.clear();
+            }
         }
 
         // Create order if not idempotent
@@ -53,14 +60,30 @@ public class OrderServiceImpl implements OrderService {
             orderRepository.save(newOrder);
         } catch(DataIntegrityViolationException e) {
             // Race condition hit.
-            return buildOrderResponse(orderRepository.findByIdempotencyKey(idempotencyKey)
-                    .orElseThrow(() -> new RuntimeException("Order could not be created. Some error occurred.")));
+            Order racedOrder = orderRepository.findByIdempotencyKey(idempotencyKey)
+                    .orElseThrow(() -> new RuntimeException("Order could not be created. Some error occurred."));
+            try {
+                MDC.put("orderId", String.valueOf(racedOrder.getId()));
+                log.info("sagaStep=ORDER_CREATE_REQUEST result=RACE_CONDITION_HIT existingOrderId={}", racedOrder.getId());
+                return buildOrderResponse(racedOrder);
+            } finally {
+                MDC.clear();
+            }
         }
 
-        // Write to Outbox table for redis publishing
-        writeToOutbox(newOrder);
+        // orderId now exists — tag every subsequent log line for this order, including the outbox write below
+        try {
+            MDC.put("orderId", String.valueOf(newOrder.getId()));
+            log.info("sagaStep=ORDER_CREATED orderId={} userId={} productId={} quantity={} amount={}",
+                    newOrder.getId(), newOrder.getUserId(), newOrder.getProductId(), newOrder.getQuantity(), newOrder.getAmount());
 
-        return buildOrderResponse(newOrder);
+            // Write to Outbox table for redis publishing
+            writeToOutbox(newOrder);
+
+            return buildOrderResponse(newOrder);
+        } finally {
+            MDC.clear();
+        }
     }
 
     private void writeToOutbox(Order newOrder) {
@@ -76,6 +99,8 @@ public class OrderServiceImpl implements OrderService {
         outboxEvent.setUserId(newOrder.getUserId());
         outboxEvent.setCreatedAt(LocalDateTime.now());
         outboxEventRepository.save(outboxEvent);
+
+        log.info("sagaStep=OUTBOX_WRITE eventType=ORDER_CREATED orderId={} outboxStatus=PENDING", newOrder.getId());
     }
 
     private OrderResponseDto buildOrderResponse(Order existingOrder) {

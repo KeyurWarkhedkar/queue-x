@@ -5,6 +5,7 @@ import com.keyur.queue_x.Enums.OrderStatus;
 import com.keyur.queue_x.Repositories.OrderRepository;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -19,7 +20,7 @@ public class OrderStatusConsumer {
     private final OrderRepository orderRepository;
     private final IdempotencyService idempotencyService;
 
-    @Scheduled(fixedDelay = 2000)
+    @Scheduled(fixedDelay = 100)
     @Transactional
     public void consumePaymentSuccess() {
         EventDto event = messageQueue.consume(QueueConstants.paymentSuccessQueue);
@@ -27,7 +28,7 @@ public class OrderStatusConsumer {
         processPaymentSuccess(event);
     }
 
-    @Scheduled(fixedDelay = 100)
+    @Scheduled(fixedDelay = 1000)
     @Transactional
     public void consumePaymentFailed() {
         EventDto event = messageQueue.consume(QueueConstants.paymentFailedForOrderApiQueue);
@@ -37,41 +38,57 @@ public class OrderStatusConsumer {
 
 
     public void processPaymentSuccess(EventDto event) {
-        if(!idempotencyService.saveRecord(event.getEventId(), event.getOrderId())) {
-            log.info("Already processed success eventId={}, skipping", event.getEventId());
-            return;
+        // Each event is consumed on the scheduler's own thread — set MDC fresh per event,
+        // clear after, since this thread is reused across unrelated orders on every poll cycle.
+        try {
+            MDC.put("orderId", String.valueOf(event.getOrderId()));
+            log.info("sagaStep=PAYMENT_SUCCESS_CONSUMED eventId={} orderId={}", event.getEventId(), event.getOrderId());
+
+            if(!idempotencyService.saveRecord(event.getEventId(), event.getOrderId())) {
+                log.info("sagaStep=PAYMENT_SUCCESS_SKIPPED reason=ALREADY_PROCESSED eventId={}", event.getEventId());
+                return;
+            }
+
+            int affected = orderRepository.updateOrderStatus(
+                    event.getOrderId(),
+                    OrderStatus.PLACED,
+                    OrderStatus.COMPLETED
+            );
+
+            if(affected == 0) {
+                log.warn("sagaStep=PAYMENT_SUCCESS_SKIPPED reason=NOT_IN_PLACED_STATUS orderId={}", event.getOrderId());
+            }
+
+            log.info("sagaStep=ORDER_COMPLETED orderId={}", event.getOrderId());
+        } finally {
+            MDC.clear();
         }
-
-        int affected = orderRepository.updateOrderStatus(
-                event.getOrderId(),
-                OrderStatus.PLACED,
-                OrderStatus.COMPLETED
-        );
-
-        if(affected == 0) {
-            log.warn("Order {} not in PLACED status, skipping update", event.getOrderId());
-        }
-
-        log.info("Order {} marked COMPLETED", event.getOrderId());
     }
 
 
     public void processPaymentFailed(EventDto event) {
-        if(!idempotencyService.saveRecord(event.getEventId(), event.getOrderId())) {
-            log.info("Already processed failed eventId={}, skipping", event.getEventId());
-            return;
+        try {
+            MDC.put("orderId", String.valueOf(event.getOrderId()));
+            log.info("sagaStep=PAYMENT_FAILED_CONSUMED eventId={} orderId={}", event.getEventId(), event.getOrderId());
+
+            if(!idempotencyService.saveRecord(event.getEventId(), event.getOrderId())) {
+                log.info("sagaStep=PAYMENT_FAILED_SKIPPED reason=ALREADY_PROCESSED eventId={}", event.getEventId());
+                return;
+            }
+
+            int affected = orderRepository.updateOrderStatus(
+                    event.getOrderId(),
+                    OrderStatus.PLACED,
+                    OrderStatus.FAILED
+            );
+
+            if(affected == 0) {
+                log.warn("sagaStep=PAYMENT_FAILED_SKIPPED reason=NOT_IN_PLACED_STATUS orderId={}", event.getOrderId());
+            }
+
+            log.info("sagaStep=ORDER_FAILED orderId={}", event.getOrderId());
+        } finally {
+            MDC.clear();
         }
-
-        int affected = orderRepository.updateOrderStatus(
-                event.getOrderId(),
-                OrderStatus.PLACED,
-                OrderStatus.FAILED
-        );
-
-        if(affected == 0) {
-            log.warn("Order {} not in PLACED status, skipping update", event.getOrderId());
-        }
-
-        log.info("Order {} marked FAILED", event.getOrderId());
     }
 }

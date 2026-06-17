@@ -78,6 +78,7 @@ jobs:
               -e SQS_PAYMENT_SUCCESS_QUEUE_URL=${{ secrets.SQS_PAYMENT_SUCCESS_QUEUE_URL }} \
               -e SQS_PAYMENT_FAILED_QUEUE_URL=${{ secrets.SQS_PAYMENT_FAILED_QUEUE_URL }} \
               -e SQS_PAYMENT_FAILED_FOR_ORDER_API_QUEUE_URL=${{ secrets.SQS_PAYMENT_FAILED_FOR_ORDER_API_QUEUE_URL }} \
+              -e LOKI_PUSH_URL=${{ secrets.LOKI_PUSH_URL }} \
               ${{ steps.build-image.outputs.image }}
 
             docker image prune -f

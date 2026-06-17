@@ -7,6 +7,7 @@ import com.keyur.queue_x.Repositories.OrderRepository;
 import jakarta.transaction.Transactional;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -31,38 +32,47 @@ public class OutOfStockConsumer {
 
     @Transactional
     public void processEvent(EventDto event) {
+        // Fresh MDC per event on this scheduler thread — cleared in finally so it
+        // never leaks into the next unrelated order processed on the same thread.
+        try {
+            MDC.put("orderId", String.valueOf(event.getOrderId()));
+            log.info("sagaStep=OUT_OF_STOCK_CONSUMED orderId={}", event.getOrderId());
 
-        Order order = orderRepository.findById(event.getOrderId())
-                .orElseThrow(() ->
-                        new RuntimeException(
-                                "Order not found: " + event.getOrderId()));
+            Order order = orderRepository.findById(event.getOrderId())
+                    .orElseThrow(() ->
+                            new RuntimeException(
+                                    "Order not found: " + event.getOrderId()));
 
-        /*
-         * Idempotent:
-         * if already FAILED, do nothing.
-         */
-        if(order.getStatus() == OrderStatus.FAILED) {
-            return;
-        }
+            /*
+             * Idempotent:
+             * if already FAILED, do nothing.
+             */
+            if(order.getStatus() == OrderStatus.FAILED) {
+                log.info("sagaStep=OUT_OF_STOCK_SKIPPED reason=ALREADY_FAILED orderId={}", order.getId());
+                return;
+            }
 
-        /*
-         * Don't overwrite terminal states.
-         */
-        if(order.getStatus() == OrderStatus.COMPLETED) {
-            log.warn(
-                    "Received OUT_OF_STOCK for completed order={}",
+            /*
+             * Don't overwrite terminal states.
+             */
+            if(order.getStatus() == OrderStatus.COMPLETED) {
+                log.warn(
+                        "sagaStep=OUT_OF_STOCK_SKIPPED reason=ALREADY_COMPLETED orderId={}",
+                        order.getId()
+                );
+                return;
+            }
+
+            order.setStatus(OrderStatus.FAILED);
+
+            orderRepository.save(order);
+
+            log.info(
+                    "sagaStep=ORDER_FAILED reason=OUT_OF_STOCK orderId={}",
                     order.getId()
             );
-            return;
+        } finally {
+            MDC.clear();
         }
-
-        order.setStatus(OrderStatus.FAILED);
-
-        orderRepository.save(order);
-
-        log.info(
-                "Order {} marked FAILED due to insufficient inventory",
-                order.getId()
-        );
     }
 }
