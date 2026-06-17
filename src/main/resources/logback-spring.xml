@@ -12,13 +12,6 @@
 
         <http>
             <url>${LOKI_PUSH_URL}</url>
-
-            <auth>
-                <basic>
-                    <username>${LOKI_USERNAME}</username>
-                    <password>${LOKI_API_KEY}</password>
-                </basic>
-            </auth>
         </http>
 
         <format>
